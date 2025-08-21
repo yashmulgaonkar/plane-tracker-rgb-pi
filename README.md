@@ -43,8 +43,13 @@ For Bookworm
 ```
 
 Set Up the Script to Run on Boot
-
-
+```
+sudo cp plane-tracker-rgb-pi/assets/plane-tracker.service /etc/systemd/system/plane-tracker.service
+sudo systemctl daemon-reexec
+sudo systemctl daemon-reload
+sudo systemctl enable plane-tracker.service
+sudo systemctl start plane-tracker.service
+```
 
 
 --- 
