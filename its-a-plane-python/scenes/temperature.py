@@ -1,17 +1,20 @@
 from datetime import datetime
-import colorsys
 from rgbmatrix import graphics
 from utilities.animator import Animator
-from setup import colours, fonts, frames, screen
+from setup import colours, fonts, frames
 from utilities.temperature import grab_temperature_and_humidity
 from config import NIGHT_START, NIGHT_END
+from datetime import datetime, timedelta
+import requests as r
+import logging
+import time
 
-# Scene Setup
-TEMPERATURE_REFRESH_SECONDS = 600
-TEMPERATURE_FONT = fonts.small
-TEMPERATURE_FONT_HEIGHT = 6
-NIGHT_START_TIME = datetime.strptime(NIGHT_START, "%H:%M")
-NIGHT_END_TIME = datetime.strptime(NIGHT_END, "%H:%M")
+from config import TOMORROW_API_KEY, TEMPERATURE_UNITS, FORECAST_DAYS, TEMPERATURE_LOCATION
+
+TOMORROW_API_URL = "https://api.tomorrow.io/v4/"
+CACHE_DURATION = timedelta(hours=1)  # <-- Cache duration
+_cached_forecast = None
+_last_forecast_time = None
 
 class TemperatureScene(object):
     def __init__(self):
@@ -32,66 +35,62 @@ class TemperatureScene(object):
 
         return graphics.Color(int(r), int(g), int(b))
 
-    @Animator.KeyFrame.add(frames.PER_SECOND * 1)
-    def temperature(self, count):
-        #redraws the screen at night start and end so it'll adjust the brightness
-        now = datetime.now().replace(microsecond=0).time()
-        if now == NIGHT_START_TIME.time() or now == NIGHT_END_TIME.time():
-            self._redraw_temp = True
-            return  
-            
-        # Ensure redraw when there's new data
-        if len(self._data):
-            self._redraw_temp = True
-            return
+def grab_forecast(delay=2):
+    global _cached_forecast, _last_forecast_time
 
-        seconds_since_update = (datetime.now() - self._last_updated).seconds if self._last_updated is not None else 0
-        if not (seconds_since_update % TEMPERATURE_REFRESH_SECONDS) or self._redraw_temp:
-            if self._cached_temp is not None and self._redraw_temp:
-                current_temperature, current_humidity = self._cached_temp
-            else:
-                self._cached_temp = current_temperature, current_humidity = grab_temperature_and_humidity()
-                self._last_updated = datetime.now()
-                
-              # Undraw old temperature
-            if self._last_temperature_str is not None:
-                self.draw_square(
-                    40,  # x-coordinate of top-left corner
-                    0,   # y-coordinate of top-left corner
-                    64,  # width of the rectangle
-                    5,   # height of the rectangle
-                    colours.BLACK,  # Use background color to clear the area
-                )
-                
-            if current_temperature is not None:
-                self._last_temperature_str = f"{round(current_temperature)}°"
-                self._last_temperature = current_temperature
-                self._redraw_temp = False
-                
-                # Get the humidity ratio (0% -> white, 100% -> blue)
-                humidity_ratio = current_humidity / 100.0
+    now = datetime.utcnow()
 
-                temp_colour = self.colour_gradient(colours.WHITE, colours.DARK_BLUE, humidity_ratio)
+    if _cached_forecast and _last_forecast_time and (now - _last_forecast_time) < CACHE_DURATION:
+        return _cached_forecast  # Return cached data
 
-                # Calculate the length of the formatted temperature string
-                font_character_width = 5
-                temperature_string_width = len(self._last_temperature_str) * font_character_width
+    try:
+        dt = now + timedelta(hours=6)
+        print(f"[{datetime.now()}] Calling Tomorrow.io API: {TOMORROW_API_URL}/timelines")  # <-- ADDED
+        
+        resp = r.post(
+            f"{TOMORROW_API_URL}/timelines",
+            headers={
+                "Accept-Encoding": "gzip",
+                "accept": "application/json",
+                "content-type": "application/json"
+            },
+            params={"apikey": TOMORROW_API_KEY},
+            json={
+                "location": TEMPERATURE_LOCATION,
+                "units": TEMPERATURE_UNITS,
+                "fields": [
+                    "temperatureMin",
+                    "temperatureMax",
+                    "weatherCodeFullDay",
+                    "sunriseTime",
+                    "sunsetTime",
+                    "moonPhase"
+                ],
+                "timesteps": ["1d"],
+                "startTime": dt.isoformat(),
+                "endTime": (dt + timedelta(days=int(FORECAST_DAYS))).isoformat()
+            },
+            timeout=10
+        )
+        resp.raise_for_status()
 
-                # Calculate the starting x-coordinate for centering within the range 40 to 64
-                middle_x = (40 + 64) // 2
+        data = resp.json().get("data", {})
+        timelines = data.get("timelines", [])
 
-                # Calculate the starting x-coordinate for centering the temperature string
-                start_x = middle_x - temperature_string_width // 2
+        if not timelines:
+            raise KeyError("Timelines not found in response.")
 
-                # Define and initialize TEMPERATURE_POSITION
-                TEMPERATURE_POSITION = (start_x, TEMPERATURE_FONT_HEIGHT)
+        forecast = timelines[0].get("intervals", [])
+        if not forecast:
+            raise KeyError("Forecast intervals not found.")
 
-                # Draw temperature
-                _ = graphics.DrawText(
-                    self.canvas,
-                    TEMPERATURE_FONT,
-                    TEMPERATURE_POSITION[0],
-                    TEMPERATURE_POSITION[1],
-                    temp_colour,
-                    self._last_temperature_str,
-                )
+        _cached_forecast = forecast
+        _last_forecast_time = now
+        return forecast
+
+    except (r.exceptions.RequestException, KeyError) as e:
+        logging.error(f"Forecast request failed: {e}")
+        logging.info(f"Retrying in {delay} seconds...")
+        time.sleep(delay)
+        return _cached_forecast  # Return cached data even if outdated
+

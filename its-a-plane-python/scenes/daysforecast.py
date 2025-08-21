@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from pathlib import Path
 from PIL import Image
 
 from utilities.animator import Animator
@@ -6,6 +7,21 @@ from setup import colours, fonts, frames, screen
 from utilities.temperature import grab_forecast
 from config import NIGHT_START, NIGHT_END
 from rgbmatrix import graphics
+
+# ---------- Path helpers ----------
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+ICONS_DIR = PROJECT_ROOT / "icons"
+
+def find_icon_path(icon_name: str) -> Path:
+    """
+    Recursively search for an icon named '<icon_name>.png' starting at BASE_DIR.
+    Raises FileNotFoundError if not found to preserve existing behavior.
+    """
+    candidate = ICONS_DIR / f"{icon_name}.png"
+    if candidate.exists():
+        return candidate
+    raise FileNotFoundError(f"Icon not found: {candidate}")
+
 
 # Setup
 DAY_COLOUR = colours.LIGHT_PINK
@@ -31,19 +47,18 @@ class DaysForecastScene(object):
 
     @Animator.KeyFrame.add(frames.PER_SECOND * 1)
     def day(self, count):
-        #redraws the screen at night start and end so it'll adjust the brightness
+        # redraws the screen at night start and end so it'll adjust the brightness
         now = datetime.now().replace(microsecond=0).time()
         if now == NIGHT_START_TIME.time() or now == NIGHT_END_TIME.time():
             self._redraw_forecast = True
             return    
-    
+
         # Ensure redraw when there's new data
         if len(self._data):
             self._redraw_forecast = True
             return
 
-        # If there's no data to display
-        # then draw the day
+        # If there's no data to display then draw the day
         current_hour = datetime.now().hour
 
         # Only draw if time needs updated
@@ -108,17 +123,18 @@ class DaysForecastScene(object):
                         day_name
                     )
 
-                    # Draw the icon
-                    image = Image.open(f"icons/{icon}.png")
+                    # Draw the icon (search project for <icon>.png)
+                    icon_path = find_icon_path(str(icon))
+                    image = Image.open(icon_path)
                     image.thumbnail((ICON_SIZE, ICON_SIZE), Image.ANTIALIAS)
                     self.matrix.SetImage(image.convert('RGB'), icon_x, ICON_POSITION)
                     
                     # Clear previous temperature values
                     self.draw_square(
-                        min_temp_x,  # Left x coordinate
-                        TEMP_POSITION - FONT_HEIGHT,  # Top y coordinate
-                        max_temp_x + max_temp_width,  # Right x coordinate
-                        TEMP_POSITION + FONT_HEIGHT,  # Bottom y coordinate
+                        min_temp_x,                    # Left x coordinate
+                        TEMP_POSITION - FONT_HEIGHT,   # Top y coordinate
+                        max_temp_x + max_temp_width,   # Right x coordinate
+                        TEMP_POSITION + FONT_HEIGHT,   # Bottom y coordinate
                         colours.BLUE
                     )
                     

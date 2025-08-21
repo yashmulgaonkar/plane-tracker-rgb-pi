@@ -1,9 +1,53 @@
-I'm on Reddit under a new name [**Fit-Garbage-2259**](https://old.reddit.com/user/fit-garbage-2259)
-
-# Project Overview
-
 This project is based on [Colin Waddell's work](https://github.com/ColinWaddell/its-a-plane-python), with some additional features I’ve added.
 
+Refactored code without hardcoded links and a systemd launch at boot.
+
+### Install Git and Configure Your Info (only Linux Bookworm shown here)
+Clone the repository:
+```
+cd ~/
+git clone git@github.com:yashmulgaonkar/plane-tracker-rgb-pi.git
+```
+
+For Linux Bookworm:
+```
+sudo apt install python3-pip
+sudo rm /usr/lib/python3.11/EXTERNALLY-MANAGED
+pip3 install pytz requests
+pip install beautifulsoup4
+pip3 install FlightRadarAPI
+sudo setcap 'cap_sys_nice=eip' /usr/bin/python3.11
+```
+
+Move the RGB Module 
+```
+cp -r ~/rpi-rgb-led-matrix/bindings/python/rgbmatrix ~/plane-tracker-rgb-pi/its-a-plane-python/
+```
+
+Make the Script Executable
+```
+chmod +x ~/plane-tracker-rgb-pi/its-a-plane-python/its-a-plane.py
+```
+
+Edit the config file
+
+```
+vim ~/plane-tracker-rgb-pi/its-a-plane-python/config.py
+```
+
+Run the Script
+
+For Bookworm
+```
+/home/path/its-a-plane-python/its-a-plane.py
+```
+
+Set Up the Script to Run on Boot
+
+
+
+
+--- 
 ## Clock Screen:
 - Displays time, date, current temperature, and a 3-day forecast.
 - The current temperature color is based on the current humidity level on a gradient of white-blue.
@@ -117,94 +161,4 @@ If you DID solder
 
 ```
 sudo ./demo -D 1 runtext.ppm --led-rows=32 --led-cols=64 --led-limit-refresh=60 --led-slowdown-gpio=2 --led-gpio-mapping=adafruit-hat-pwm
-```
-
-
-### 4. Install Git and Configure Your Info
-You'll need Git for downloading the project files and other resources:
-
-```bash
-sudo apt-get install git
-git config --global user.name "YOUR NAME"
-git config --global user.email "YOUR EMAIL"
-```
-Clone the repository:
-```
-git clone https://github.com/c0wsaysmoo/plane-tracker-rgb-pi
-```
-If the bridge on the bonnet is not soldered, you'll need to set HAT_PWM_ENABLED=False in the config file.
-
-After cloning the files, move everything to the main folder, as some files need to be in /home/path/ rather than /home/path/plane-tracker-rgb-pi/ You'll need to combine the two logos folders since Github only allows 1,000 files per folder so I had to split them.
-```
-mv /home/path/plane-tracker-rgb-pi/* /home/path/
-mkdir /home/path/logos
-mv /home/path/logo/* /home/path/logos/
-mv /home/path/logo2/* /home/path/logos/
-```
-
-For Linux Bookworm:
-```
-sudo apt install python3-pip
-sudo rm /usr/lib/python3.11/EXTERNALLY-MANAGED
-pip3 install pytz requests
-pip install beautifulsoup4
-pip3 install FlightRadarAPI
-sudo setcap 'cap_sys_nice=eip' /usr/bin/python3.11
-```
-
-For Linux Bullseye:
-```
-sudo apt install python3-pip
-sudo pip3 install pytz requests
-sudo pip install beautifulsoup4
-sudo pip3 install FlightRadarAPI
-```
-
-Move the RGB Module 
-```
-mv /home/path/rpi-rgb-led-matrix/bindings/python/rgbmatrix /home/path/its-a-plane-python/
-```
-
-Make the Script Executable
-```
-chmod +x /home/path/its-a-plane-python/its-a-plane.py
-```
-
-Edit the config file
-
-```
-nano /home/path/its-a-plane-python/config.py
-```
-
-Run the Script
-
-For Bookworm
-```
-/home/path/its-a-plane-python/its-a-plane.py
-```
-
-For Bullseye
-```
-sudo /home/path/its-a-plane-python/its-a-plane.py
-```
-
-Set Up the Script to Run on Boot
-
-To ensure the script runs on boot, use crontab -e to edit the cron jobs and add the following line:
-
-For Bookworm
-```
-@reboot sleep 60 && /home/flight/its-a-plane-python/its-a-plane.py
-```
-
-For Bullseye 
-```
-@reboot sleep 60 && sudo /home/flight/its-a-plane-python/its-a-plane.py
-```
-
-Optional: Add a Power Button
-If you'd like to add a power button, you can solder the button to the **GND/SCL** pins on the bonnet. Then, run the following commands:
-```
-git clone https://github.com/Howchoo/pi-power-button.git
-./pi-power-button/script/install
 ```

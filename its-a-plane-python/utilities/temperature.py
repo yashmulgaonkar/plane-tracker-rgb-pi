@@ -25,11 +25,11 @@ from config import TEMPERATURE_LOCATION
 # Weather API
 TOMORROW_API_URL = "https://api.tomorrow.io/v4/"
 
-def grab_temperature_and_humidity(delay=2, max_retries=None):
+def grab_temperature_and_humidity(delay=2, max_retries=1):
     current_temp, humidity = None, None
     retries = 0
 
-    while True:
+    while retries < max_retries:
         try:
             request = r.get(
                 f"{TOMORROW_API_URL}/weather/realtime",
@@ -38,16 +38,14 @@ def grab_temperature_and_humidity(delay=2, max_retries=None):
                     "units": TEMPERATURE_UNITS,
                     "apikey": TOMORROW_API_KEY
                 },
-                timeout=10  # Add timeout for the request
+                timeout=10
             )
-            request.raise_for_status()  # Raise an exception for 4xx or 5xx status codes
+            request.raise_for_status()
             
-            # Safely extract data
             data = request.json().get("data", {}).get("values", {})
             current_temp = data.get("temperature")
             humidity = data.get("humidity")
 
-            # If temperature or humidity is missing, assign a default value of 0
             if current_temp is None:
                 logging.warning("Temperature data missing, defaulting to 0.")
                 current_temp = 0
@@ -56,21 +54,17 @@ def grab_temperature_and_humidity(delay=2, max_retries=None):
                 logging.warning("Humidity data missing, defaulting to 0.")
                 humidity = 0
 
-            # If the data is valid (including defaults), exit the loop
-            break
+            return current_temp, humidity
 
         except (r.exceptions.RequestException, ValueError) as e:
             logging.error(f"Request failed. Error: {e}")
-            
             retries += 1
-            if max_retries and retries >= max_retries:
-                logging.error("Max retries reached. Exiting.")
-                break
-            
-            logging.info(f"Retrying in {delay} seconds...")
-            time.sleep(delay)
+            if retries < max_retries:
+                logging.info(f"Retrying in {delay} seconds...")
+                time.sleep(delay)
 
-    return current_temp, humidity
+    return None  # signal failure explicitly
+
 
 def grab_forecast(delay=2):
     while True:
