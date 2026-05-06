@@ -1,3 +1,4 @@
 its-a-plane-python/config.py
 __pycache__/
 *.pyc
+its-a-plane-python/rgbmatrix/.gitignore
