@@ -90,7 +90,7 @@ class FlightDetailsScene(object):
             flight_no_text_length += text_length
 
         # Handle scrolling
-        self.flight_position -= 1
+        self.flight_position -= 2
         if self.flight_position + flight_no_text_length < 0:
             self.flight_position = screen.WIDTH
             if len(self._data) > 1:

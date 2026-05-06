@@ -4,19 +4,20 @@ ZONE_HOME = {
     "br_y": 37.556396, # Bottom-Right Latitude (deg)
     "br_x": -122.167870 # Bottom-Right Longitude (deg)
 }
+
 LOCATION_HOME = [
     37.548231, # Latitude (deg)
     -122.277988 # Longitude (deg)
 ]
 TEMPERATURE_LOCATION = "37.548231,-122.277988" #same as location home
-TOMORROW_API_KEY = "DkrARHXijK9lUFFaM2degl5Y0ExLueK1" # Get an API key from https://tomorrow.io they only allows 25 pulls an hour, if you reach the limit you'll need to wait until the next hour 
+TOMORROW_API_KEY = "Rf9KBVTuClip9JhbsdLwetJqcs8k4t0M" # from yashruti01 account: Get an API key from https://tomorrow.io they only allows 25 pulls an hour, if you reach the limit you'll need to wait until the next hour 
 TEMPERATURE_UNITS = "imperial" #can use "metric" if you want, same for distance 
 DISTANCE_UNITS = "imperial"
 CLOCK_FORMAT = "12hr" #use 12hr or 24hr
 MIN_ALTITUDE = 500 #feet above sea level. If you live at 1000ft then you'd want to make yours ~3600 etc. I use 2600 to weed out some of the smaller general aviation traffic. 
 BRIGHTNESS = 100
 BRIGHTNESS_NIGHT = 50
-NIGHT_BRIGHTNESS = False #True for on False for off
+NIGHT_BRIGHTNESS = True #True for on False for off
 NIGHT_START = "22:00" #dims screen between these hours
 NIGHT_END = "07:00"
 GPIO_SLOWDOWN = 2 #depends what Pi you have I use 2 for Pi 3 and 1 for Pi Zero
@@ -24,3 +25,11 @@ JOURNEY_CODE_SELECTED = "SFO" #your home airport code
 JOURNEY_BLANK_FILLER = " ? " #what to display if theres no airport code
 HAT_PWM_ENABLED = True #only if you haven't soldered the PWM bridge use True if you did
 FORECAST_DAYS = 3 #today plus the next two days
+
+# OpenSky Network API credentials (OAuth2 client-credentials).
+# Anonymous polling works but has very low rate limits, especially for
+# bounding-box state queries. Create an API client at
+# https://opensky-network.org/my-opensky and paste the values here.
+# Leave both empty to fall back to anonymous access.
+OPENSKY_CLIENT_ID = "thesassyindian-api-client"
+OPENSKY_CLIENT_SECRET = "5Evzm7AzQmVgibKsDtoWNexVZ5zfcXCF"

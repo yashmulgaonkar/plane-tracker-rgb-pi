@@ -1,30 +1,49 @@
+Flight Tracker Status Update
+
+With the discontinuation of FlightRadar24’s free API tier even for Contributor accounts, I have transitioned the backend to a multi-source workaround. The script now utilizes OpenSky for real-time overhead tracking, supplemented by adsbdb for fetching specific flight metadata.
+
+Current Status: Partially tested.
+
+Known Issue: Basic tracking is functional; however, there is a known bug causing occasional inaccuracies in destination airport codes.
+
+---
+
 This project is based on [Colin Waddell's work](https://github.com/ColinWaddell/its-a-plane-python), with some additional features I’ve added.
 
 Refactored code without hardcoded links and a systemd launch at boot.
 
 ### Install Git and Configure Your Info (only Linux Bookworm shown here)
+
 Clone the repository:
+
 ```
 cd ~/
 git clone git@github.com:yashmulgaonkar/plane-tracker-rgb-pi.git
 ```
 
 For Linux Bookworm:
+
 ```
 sudo apt install python3-pip
 sudo rm /usr/lib/python3.11/EXTERNALLY-MANAGED
 pip3 install pytz requests
 pip install beautifulsoup4
-pip3 install FlightRadarAPI
+pip3 install "git+https://github.com/openskynetwork/opensky-api.git#subdirectory=python"
 sudo setcap 'cap_sys_nice=eip' /usr/bin/python3.11
 ```
 
+Flight discovery uses the [OpenSky Network API](https://github.com/openskynetwork/opensky-api) and aircraft / route lookups go through [adsbdb](https://api.adsbdb.com) (`api.adsbdb.com`, no key required).
+
+Anonymous OpenSky polling is rate-limited. For best results create an API client at [https://opensky-network.org/my-opensky](https://opensky-network.org/my-opensky) and paste the `clientId` / `clientSecret` into `OPENSKY_CLIENT_ID` and `OPENSKY_CLIENT_SECRET` in `config.py`.
+
 Move the RGB Module 
+
 ```
 cp -r ~/rpi-rgb-led-matrix/bindings/python/rgbmatrix ~/plane-tracker-rgb-pi/its-a-plane-python/
 ```
 
 Make the Script Executable
+
 ```
 chmod +x ~/plane-tracker-rgb-pi/its-a-plane-python/its-a-plane.py
 ```
@@ -38,11 +57,13 @@ vim ~/plane-tracker-rgb-pi/its-a-plane-python/config.py
 Run the Script
 
 For Bookworm
+
 ```
 /home/path/its-a-plane-python/its-a-plane.py
 ```
 
 Set Up the Script to Run on Boot
+
 ```
 sudo cp plane-tracker-rgb-pi/assets/plane-tracker.service /etc/systemd/system/plane-tracker.service
 sudo systemctl daemon-reexec
@@ -51,9 +72,10 @@ sudo systemctl enable plane-tracker.service
 sudo systemctl start plane-tracker.service
 ```
 
+---
 
---- 
 ## Clock Screen:
+
 - Displays time, date, current temperature, and a 3-day forecast.
 - The current temperature color is based on the current humidity level on a gradient of white-blue.
 - Time changes color at sunrise and sunset.
@@ -62,9 +84,9 @@ sudo systemctl start plane-tracker.service
 - You can switch between 12hr/24hr time and choose imperial or metric units.
 
 ## Flight Tracker Screen:
-- Displays the origin and destination airport codes, with distances to both airports.
-- Airport codes are color-coded based on the difference between the scheduled and actual departure times, as well as the scheduled and estimated arrival times.
 
+- Displays the origin and destination airport codes, with distances to both airports.
+- Airport codes are color-coded based on the difference between the scheduled and actual departure times, as well as the scheduled and estimated arrival times. *Note: the current OpenSky + adsbdb data sources don't expose scheduled vs. actual times, so airport codes show in neutral grey until/unless a schedule source is wired up.*
   **Departure:**
   - 0-20 mins: Green
   - 20-40 mins: Yellow
@@ -72,7 +94,6 @@ sudo systemctl start plane-tracker.service
   - 1-4 hrs: Red
   - 4-8 hrs: Purple
   - 8+ hrs: Blue
-  
   **Arrival:**
   - On-time or early: Green
   - 0-30 mins late: Yellow
@@ -80,9 +101,7 @@ sudo systemctl start plane-tracker.service
   - 1-4 hrs late: Red
   - 4-8 hrs late: Purple
   - 8+ hrs late: Blue
- 
-  - If either the actual arrival time is None (not updated yet) or actual departure time is None (not updated yet) the airport code will be Grey. Happens if you live close to an airport 
-
+  - If either the actual arrival time is None (not updated yet) or actual departure time is None (not updated yet) the airport code will be Grey. Happens if you live close to an airport
 - An arrow between the airport codes acts as a progress bar for the flight, starting red (just left) and turning green (almost complete).
 - Below, the airline’s IATA name, flight number, abbreviated aircraft type, and the distance/direction to your location are displayed.
 - The airline's ICAO code is shown in the logo, indicating which airline is operating the flight. This is especially useful for regional carriers, where an airline might operate flights for multiple brands (e.g., Republic Airways flying for American Eagle, Delta Connection, and United Express).
@@ -92,24 +111,23 @@ I've put a LOT of my time and effort into this project. If you'd like to show yo
 
 Please please please reread the instructions carefully if you have any issues. Most issues are by not following them properly. If you absolutly can't figure it out shoot me a message.
 
-![tracker](https://github.com/user-attachments/assets/802a6c43-31d2-48dc-816b-4eb0ca0367e1)
-![PXL_20241019_155956016](https://github.com/user-attachments/assets/91532d4f-3b6f-4a1b-9a26-43ffe5c6093d)
-![PXL_20241019_165254031](https://github.com/user-attachments/assets/2e70bfcd-70ae-4acc-ba69-dde07c56a068)
-![PXL_20241019_165305826](https://github.com/user-attachments/assets/5188780d-84ff-4111-8bde-9584d6a70df2)
-![PXL_20241019_155500974](https://github.com/user-attachments/assets/5c3540e9-b699-41c8-8aef-32fb7a7f7b5d)
+tracker
+PXL_20241019_155956016
+PXL_20241019_165254031
+PXL_20241019_165305826
+PXL_20241019_155500974
 Had to remount the Pi since the display ribbon bumped into the panel 
-![PXL_20241019_155518437](https://github.com/user-attachments/assets/2d6f4beb-59f1-4771-80ce-8bafd00cd1fc)
-![PXL_20241019_155605121](https://github.com/user-attachments/assets/4b71b758-00c9-4586-a5a0-ad251696eb17)
-![PXL_20241019_155629794](https://github.com/user-attachments/assets/f82088b8-e959-44e3-82f3-7207779cc659)
-![PXL_20241019_155732297](https://github.com/user-attachments/assets/77a329c7-d9c2-4a33-ab07-b6f6a2bf6ded)
-
-
+PXL_20241019_155518437
+PXL_20241019_155605121
+PXL_20241019_155629794
+PXL_20241019_155732297
 
 ---
 
 ## Hardware Overview:
 
 This is what I used to make mine. Other than the Pi and the Bonnet you can use whatever you want. 
+
 - Raspberry Pi 3A+ (Pi Zero had flickering, and Pi 5 isn’t compatible)
 - [Adafruit bonnet](https://www.adafruit.com/product/3211)
 - [64x32 RGB P4 panel](https://www.adafruit.com/product/2278) (I used a P4 panel measuring approximately 10 inches by 5 inches. If you prefer a smaller screen, you can opt for P3 or P2.5 panels etc, as long as they are 64x32 in size. These are available on Amazon and other websites. If the colors appear inverted, adjust the display file by changing 'RGB' to 'RBG.')
@@ -131,19 +149,21 @@ This is what I used to make mine. Other than the Pi and the Bonnet you can use w
 
 Once you get your Raspberry Pi up and running, you can follow [this guide](https://linuxconfig.org/enabling-ssh-on-raspberry-pi-a-comprehensive-guide) to set up the project. 
 
-
 ### 1. Install Raspberry Pi OS Lite
+
 Using the official Raspberry Pi Imager, go to `Other` and select **Raspberry Pi 64 OS Lite** (the Pi Zero only supports Raspberry Pi 32 OS lite). **Note** whether the version is **Bookworm** or **Bullseye** — this will matter later.
 When using the Imager make sure these settings are selected to enable SSH and make sure your WIFI information is typed in EXACTLY or else it won't connect when turned on.
 
-![edit](https://github.com/user-attachments/assets/3141a507-6746-4741-84ba-2c5a6f319004)
-![wifi](https://github.com/user-attachments/assets/0669de7a-cb9c-4c2a-9129-8b044c088f9f)
-![ssh](https://github.com/user-attachments/assets/67d6fa8f-5ae3-4bf9-9f47-fbf78017ad78)
+edit
+wifi
+ssh
 
 ### 2. Connect via SSH
+
 I use **MobaXterm** on Windows to SSH into the Pi. After SSH-ing into the Pi, proceed with the following steps.
 
 ### 3. Install the Adafruit Bonnet
+
 [Install the bonnet](https://learn.adafruit.com/adafruit-rgb-matrix-bonnet-for-raspberry-pi/driving-matrices) by following the instructions provided by Adafruit.
 
 You can solder a bridge between the 4 and 18 to enable PWM for less screen flicker and smoother scrolling. It is optional as it will work without the bridge. More details in the link above.
@@ -167,3 +187,4 @@ If you DID solder
 ```
 sudo ./demo -D 1 runtext.ppm --led-rows=32 --led-cols=64 --led-limit-refresh=60 --led-slowdown-gpio=2 --led-gpio-mapping=adafruit-hat-pwm
 ```
+

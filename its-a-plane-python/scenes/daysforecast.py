@@ -74,13 +74,16 @@ class DaysForecastScene(object):
                 self.draw_square(0, 12, 64, 32, colours.BLACK)
             self._last_hour = current_hour
 
-            # Fetch forecast only when hour changes
+            # Fetch forecast only when hour changes. If the fetch fails we
+            # keep the previous cached_forecast so the screen doesn't blank
+            # out, and we leave _redraw_forecast alone.
             forecast = grab_forecast()
-            self._cached_forecast = forecast
-            self._redraw_forecast = False
+            if forecast:
+                self._cached_forecast = forecast
+                self._redraw_forecast = True
 
-        # Fetch and cache current temperature every 5 min (300 seconds)
-        if not self._last_temp_fetch or (now - self._last_temp_fetch).seconds > 300:
+        # Fetch and cache current temperature every 10 min (600 seconds)
+        if not self._last_temp_fetch or (now - self._last_temp_fetch).seconds > 600:
             temp, _ = grab_temperature_and_humidity()
             self._cached_current_temp = temp
             self._last_temp_fetch = now
