@@ -27,22 +27,22 @@ class DateScene(object):
 
     def moonphase(self):
             now = datetime.now()
-            
-            #print("last fetch is", self.last_fetched_moonphase, "; now day is", now.day)
-            if self.last_fetched_moonphase != now.day:
-                #print("Fetching forecast data...")
-                forecast = grab_forecast()
-                for day in forecast:
-                    forecast_date = day['startTime'][:10]
-                    if forecast_date == now.strftime('%Y-%m-%d'):
-                       utc_moonphase = int(day["values"]["moonPhase"])
-                       self.today_moonphase = utc_moonphase  # Update moon phase
-                       self.last_fetched_moonphase = now.day  # Update the last fetch date
-                       #logging.info(f"Fetched forecast data for {forecast_date}, moonphase: {utc_moonphase}")
-                       #print(f"Fetched forecast data for {forecast_date}, moonphase: {utc_moonphase}")
-                       break 
 
-          #Return the cached moon phase value
+            if self.last_fetched_moonphase != now.day:
+                forecast = grab_forecast()
+                # grab_forecast() returns None when tomorrow.io is
+                # unreachable / rate-limited and no prior cache exists.
+                # Keep the previous cached moon phase (possibly None) and
+                # try again on the next call.
+                if forecast:
+                    for day in forecast:
+                        forecast_date = day['startTime'][:10]
+                        if forecast_date == now.strftime('%Y-%m-%d'):
+                           utc_moonphase = int(day["values"]["moonPhase"])
+                           self.today_moonphase = utc_moonphase  # Update moon phase
+                           self.last_fetched_moonphase = now.day  # Update the last fetch date
+                           break
+
             return self.today_moonphase
 
     def map_moon_phase_to_color(self, moonphase):
@@ -58,6 +58,10 @@ class DateScene(object):
             [colours.DARK_MID_PURPLE, colours.DARK_PURPLE]  # Moon phase 7 (middle_purple to PINK_DARK gradient)
             # Define colors for the remaining phases as needed
         ]
+
+        # Default to neutral grey when we have no forecast / moon phase yet.
+        if moonphase is None:
+            return colours.GREY, colours.GREY
 
         # Ensure moonphase is within the valid range
         moonphase = min(max(moonphase, 0), 7)

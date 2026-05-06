@@ -33,19 +33,21 @@ class ClockScene(object):
         if (self.last_fetch_date != now.date()):
             #print("Fetching forecast data...")
             forecast = grab_forecast()
-            for day in forecast:
-                forecast_date = day['startTime'][:10]
-                if forecast_date == now.strftime('%Y-%m-%d'):
-                    # Parse UTC sunrise and sunset times
-                    utc_sunrise = datetime.strptime(day['values']['sunriseTime'], '%Y-%m-%dT%H:%M:%SZ')
-                    utc_sunset = datetime.strptime(day['values']['sunsetTime'], '%Y-%m-%dT%H:%M:%SZ')
+            # `grab_forecast()` may return None when tomorrow.io is
+            # unreachable / rate-limited and we have no prior cache. In that
+            # case keep whatever we have (possibly None) and try again later.
+            if forecast:
+                for day in forecast:
+                    forecast_date = day['startTime'][:10]
+                    if forecast_date == now.strftime('%Y-%m-%d'):
+                        # Parse UTC sunrise and sunset times
+                        utc_sunrise = datetime.strptime(day['values']['sunriseTime'], '%Y-%m-%dT%H:%M:%SZ')
+                        utc_sunset = datetime.strptime(day['values']['sunsetTime'], '%Y-%m-%dT%H:%M:%SZ')
 
-                    # Cache the sunrise and sunset times
-                    self.today_sunrise = utc_sunrise
-                    self.today_sunset = utc_sunset
-                    self.last_fetch_date = now.date()  # Update the last fetch date
-                    #logging.info(f"Fetched forecast data for {forecast_date}, sunrise: {utc_sunrise}, sunset: {utc_sunset}")
-                    #print(f"Fetched forecast data for {forecast_date}, sunrise: {utc_sunrise}, sunset: {utc_sunset}")
+                        # Cache the sunrise and sunset times
+                        self.today_sunrise = utc_sunrise
+                        self.today_sunset = utc_sunset
+                        self.last_fetch_date = now.date()  # Update the last fetch date
 
         return self.today_sunrise, self.today_sunset
 
@@ -65,15 +67,21 @@ class ClockScene(object):
 
             utc_sunrise, utc_sunset = self.calculate_sunrise_sunset()
 
-            time_until_sunrise = (utc_sunrise - datetime.utcnow()).total_seconds()
-            time_until_sunset = (utc_sunset - datetime.utcnow()).total_seconds()
-            
-            if time_until_sunset <= 0:
-                clock_color = NIGHT_COLOUR
-            elif time_until_sunrise <= 0:
-                clock_color = DAY_COLOUR
+            # Without a forecast we don't know when sunrise / sunset are, so
+            # fall back to a coarse hour-of-day check so the clock still
+            # renders in a sensible colour.
+            if utc_sunrise is None or utc_sunset is None:
+                clock_color = DAY_COLOUR if 6 <= now.hour < 20 else NIGHT_COLOUR
             else:
-                clock_color = NIGHT_COLOUR
+                time_until_sunrise = (utc_sunrise - datetime.utcnow()).total_seconds()
+                time_until_sunset = (utc_sunset - datetime.utcnow()).total_seconds()
+
+                if time_until_sunset <= 0:
+                    clock_color = NIGHT_COLOUR
+                elif time_until_sunrise <= 0:
+                    clock_color = DAY_COLOUR
+                else:
+                    clock_color = NIGHT_COLOUR
 
             if self._last_time:
                 _ = graphics.DrawText(

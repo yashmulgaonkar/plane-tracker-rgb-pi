@@ -1,1 +1,3 @@
 its-a-plane-python/config.py
+__pycache__/
+*.pyc
