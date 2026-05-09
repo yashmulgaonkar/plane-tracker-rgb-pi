@@ -2,3 +2,14 @@ its-a-plane-python/config.py
 __pycache__/
 *.pyc
 its-a-plane-python/rgbmatrix/.gitignore
+# Python build output
+__pycache__/
+*.pyc
+# Runtime state written by the tracker
+close.txt
+farthest.txt
+current_overhead.json
+flight_counter.json
+api_usage.json
+airlabs_usage.json
+flightaware_usage.json
