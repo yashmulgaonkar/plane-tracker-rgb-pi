@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Farthest Flights Map</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=VT323&family=Share+Tech+Mono&display=swap');
+        :root {
+            --bg: #0d0d0b; --amber: #ffb300; --amber-dim: #7a5500;
+            --amber-bright: #ffd54f; --row-border: rgba(255,179,0,0.08);
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        html, body { height: 100%; }
+        body {
+            background: var(--bg); color: var(--amber);
+            font-family: 'Share Tech Mono', monospace;
+            display: flex; flex-direction: column;
+        }
+        body::before {
+            content: ''; position: fixed; inset: 0;
+            background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.03) 2px, rgba(0,0,0,0.03) 4px);
+            pointer-events: none; z-index: 1000;
+        }
+        .board-header {
+            background: var(--amber); color: var(--bg);
+            padding: 10px 20px; display: flex; align-items: center; gap: 12px;
+            flex-shrink: 0;
+        }
+        .board-title { font-family: 'VT323', monospace; font-size: 28px; letter-spacing: 4px; text-transform: uppercase; }
+        .back { font-family: 'VT323', monospace; font-size: 20px; letter-spacing: 2px; margin-left: auto;
+                background: var(--bg); color: var(--amber); padding: 2px 12px; text-decoration: none; }
+        .map-wrap { flex: 1; padding: 12px 16px 16px; display: flex; flex-direction: column; }
+        iframe { flex: 1; border: 1px solid var(--amber-dim); display: block; }
+    </style>
+</head>
+<body>
+    <div class="board-header">
+        <span style="font-size:22px">✈</span>
+        <div class="board-title">Farthest Flights Map</div>
+        <a class="back" href="/">← BOARD</a>
+    </div>
+    <div class="map-wrap">
+        <iframe src="{{ url_for('maps', filename='farthest.html') }}"></iframe>
+    </div>
+</body>
+</html>

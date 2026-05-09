@@ -1,446 +1,870 @@
 """
-Overhead-flight discovery and lookup.
-
-- Flight discovery uses the OpenSky Network API (`opensky_api` Python library):
-    https://github.com/openskynetwork/opensky-api
-  We pull state vectors inside the bounding box defined by ZONE_HOME.
-
-- Flight details (aircraft type, airline, route) are looked up from
-  api.adsbdb.com via the combined endpoint:
-    GET /v0/aircraft/{mode_s}?callsign={callsign}
-  The `pyadsbdb` package is a thin wrapper around the same service; we call
-  the JSON endpoint directly with `requests` so we can get aircraft +
-  flightroute in a single round-trip.
+overhead.py — Auto-selects master or slave mode based on config.
+If MASTER_TRACKER = "" this Pi runs the full OpenSky + FR24 stack.
+If MASTER_TRACKER = "hostname" this Pi polls the master for data.
 """
 
-from threading import Thread, Lock
-from time import sleep
-import math
-
-import requests
-from requests.exceptions import ConnectionError, RequestException
-from urllib3.exceptions import NewConnectionError, MaxRetryError
-
-from opensky_api import OpenSkyApi
-
-from config import DISTANCE_UNITS
-
 try:
-    from config import MIN_ALTITUDE
-except (ModuleNotFoundError, NameError, ImportError):
-    MIN_ALTITUDE = 0  # feet
+    from config import MASTER_TRACKER
+except (ImportError, ModuleNotFoundError, NameError):
+    MASTER_TRACKER = ""
 
-try:
-    from config import ZONE_HOME, LOCATION_HOME
-    ZONE_DEFAULT = ZONE_HOME
-    LOCATION_DEFAULT = LOCATION_HOME
-except (ModuleNotFoundError, NameError, ImportError):
-    ZONE_DEFAULT = {"tl_y": 62.61, "tl_x": -13.07, "br_y": 49.71, "br_x": 3.46}
-    LOCATION_DEFAULT = [51.509865, -0.118092]
+if MASTER_TRACKER:
+    import os, json, math as _math
+    from threading import Thread, Lock
+    import requests
+    from requests.exceptions import ConnectionError
+    from urllib3.exceptions import NewConnectionError, MaxRetryError
 
-# OpenSky now requires OAuth2 client-credentials for anything beyond very
-# limited anonymous polling. Credentials are optional in config.
-try:
-    from config import OPENSKY_CLIENT_ID, OPENSKY_CLIENT_SECRET
-except (ModuleNotFoundError, NameError, ImportError):
-    OPENSKY_CLIENT_ID = ""
-    OPENSKY_CLIENT_SECRET = ""
+    BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 
-
-RETRIES = 3
-RATE_LIMIT_DELAY = 1
-MAX_FLIGHT_LOOKUP = 5
-MAX_ALTITUDE = 100000  # feet
-EARTH_RADIUS_M = 3958.8  # Earth's radius in miles
-BLANK_FIELDS = ["", "N/A", "NONE"]
-
-METERS_TO_FEET = 3.28084
-MS_TO_FT_PER_MIN = 196.8504  # m/s -> ft/min
-
-ADSBDB_BASE_URL = "https://api.adsbdb.com/v0"
-ADSBDB_TIMEOUT = 10  # seconds
-
-
-def polar_to_cartesian(lat, long, alt):
-    DEG2RAD = math.pi / 180
-    return [
-        alt * math.cos(DEG2RAD * lat) * math.sin(DEG2RAD * long),
-        alt * math.sin(DEG2RAD * lat),
-        alt * math.cos(DEG2RAD * lat) * math.cos(DEG2RAD * long),
-    ]
-
-
-def _haversine_miles(lat1, lon1, lat2, lon2):
-    lat1, lon1 = math.radians(lat1), math.radians(lon1)
-    lat2, lon2 = math.radians(lat2), math.radians(lon2)
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
-    a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    return EARTH_RADIUS_M * c
-
-
-def _to_user_units(dist_miles):
-    if DISTANCE_UNITS == "metric":
-        return dist_miles * 1.609
-    return dist_miles
-
-
-def distance_from_flight_to_home(flight, home=LOCATION_DEFAULT):
     try:
-        return _to_user_units(
-            _haversine_miles(flight.latitude, flight.longitude, home[0], home[1])
-        )
-    except (AttributeError, TypeError):
-        return 1e6
+        from config import LOCATION_HOME as _SLAVE_HOME
+    except Exception:
+        _SLAVE_HOME = [41.882724, -87.623350]
 
-
-def plane_bearing(flight, home=LOCATION_DEFAULT):
-    lat1 = math.radians(home[0])
-    long1 = math.radians(home[1])
-    lat2 = math.radians(flight.latitude)
-    long2 = math.radians(flight.longitude)
-    bearing = math.atan2(
-        math.sin(long2 - long1) * math.cos(lat2),
-        math.cos(lat1) * math.sin(lat2)
-        - math.sin(lat1) * math.cos(lat2) * math.cos(long2 - long1),
-    )
-    bearing = math.degrees(bearing)
-    return (bearing + 360) % 360
-
-
-def degrees_to_cardinal(d):
-    dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
-    ix = int((d + 22.5) / 45)
-    return dirs[ix % 8]
-
-
-def distance_from_flight_to_origin(flight, origin_latitude, origin_longitude, origin_altitude):
-    if not (hasattr(flight, "latitude") and hasattr(flight, "longitude")):
-        return None
     try:
-        return _to_user_units(
-            _haversine_miles(flight.latitude, flight.longitude, origin_latitude, origin_longitude)
-        )
-    except Exception as e:
-        print("Error:", e)
-        return None
+        from config import DISTANCE_UNITS as _DISTANCE_UNITS
+    except Exception:
+        _DISTANCE_UNITS = "imperial"
 
+    _R = 3958.8
 
-def distance_from_flight_to_destination(flight, destination_latitude, destination_longitude, destination_altitude):
-    if not (hasattr(flight, "latitude") and hasattr(flight, "longitude")):
-        return None
-    try:
-        return _to_user_units(
-            _haversine_miles(
-                flight.latitude, flight.longitude, destination_latitude, destination_longitude
-            )
-        )
-    except Exception as e:
-        print("Error:", e)
-        return None
+    def _hav(lat1, lon1, lat2, lon2):
+        import math as m
+        lat1,lon1,lat2,lon2 = map(m.radians,(lat1,lon1,lat2,lon2))
+        dlat,dlon = lat2-lat1, lon2-lon1
+        a = m.sin(dlat/2)**2 + m.cos(lat1)*m.cos(lat2)*m.sin(dlon/2)**2
+        miles = _R * 2 * m.atan2(m.sqrt(a), m.sqrt(1-a))
+        return miles * 1.609 if _DISTANCE_UNITS == "metric" else miles
 
+    def _bear(lat, lon):
+        import math as m
+        la1,lo1 = map(m.radians,_SLAVE_HOME)
+        la2,lo2 = map(m.radians,(lat,lon))
+        b = m.atan2(m.sin(lo2-lo1)*m.cos(la2), m.cos(la1)*m.sin(la2)-m.sin(la1)*m.cos(la2)*m.cos(lo2-lo1))
+        return (m.degrees(b)+360)%360
 
-class _Flight:
-    """Lightweight flight wrapper that mirrors the attributes the rest of the
-    file (and the distance/bearing helpers) expect from a flight object."""
+    def _card(d):
+        return ["N","NE","E","SE","S","SW","W","NW"][int((d+22.5)/45)%8]
 
-    __slots__ = (
-        "icao24",
-        "callsign",
-        "latitude",
-        "longitude",
-        "altitude",
-        "vertical_speed",
-        "true_track",
-    )
+    def _recalc(flights):
+        for f in flights:
+            lat,lon = f.get("plane_latitude"), f.get("plane_longitude")
+            if lat and lon:
+                f["distance"]  = _hav(lat, lon, _SLAVE_HOME[0], _SLAVE_HOME[1])
+                f["direction"] = _card(_bear(lat, lon))
+        return flights
 
-    def __init__(self, state):
-        self.icao24 = (state.icao24 or "").lower()
-        self.callsign = (state.callsign or "").strip()
-        self.latitude = state.latitude
-        self.longitude = state.longitude
+    def _url(path):
+        host = MASTER_TRACKER.rstrip("/")
+        if not host.startswith("http"):
+            host = f"http://{host}.local:8080"
+        return f"{host}{path}"
 
-        # Prefer geo_altitude (GPS), fall back to baro_altitude. Convert m -> ft
-        # since MIN_ALTITUDE/MAX_ALTITUDE are expressed in feet.
-        alt_m = state.geo_altitude if state.geo_altitude is not None else state.baro_altitude
-        self.altitude = (alt_m * METERS_TO_FEET) if alt_m is not None else 0.0
+    class Overhead:
+        def __init__(self):
+            self._lock = Lock()
+            self._data, self._tracked_data = [], None
+            self._new_data = self._processing = False
+            self._fr24_ok = True
+            print(f"[Overhead] Slave mode — polling master at {_url('')}")
 
-        # Convert m/s -> ft/min so vertical_speed has the same scale that
-        # the previous FlightRadar24 integration produced.
-        self.vertical_speed = (
-            state.vertical_rate * MS_TO_FT_PER_MIN if state.vertical_rate is not None else 0.0
-        )
-        self.true_track = state.true_track
+        def grab_data(self):
+            Thread(target=self._grab, daemon=True).start()
 
+        def _grab(self):
+            with self._lock:
+                self._new_data = False
+                self._processing = True
+            try:
+                r = requests.get(_url("/overhead/json"), timeout=10)
+                r.raise_for_status()
+                data = r.json()
+                if not isinstance(data, list): data = []
+                data = _recalc(data)
+                tracked = None
+                try:
+                    tr = requests.get(_url("/tracked/json/live"), timeout=10)
+                    tr.raise_for_status()
+                    td = tr.json()
+                    tracked = td if td.get("callsign") else None
+                except Exception as e:
+                    print(f"[Slave] Tracked poll failed: {e}")
+                with self._lock:
+                    self._data, self._tracked_data = data, tracked
+                    self._new_data = True
+                    self._processing = False
+            except (ConnectionError, NewConnectionError, MaxRetryError) as e:
+                print(f"[Slave] Cannot reach master: {e}")
+                with self._lock:
+                    self._new_data = self._processing = False
+            except Exception as e:
+                print(f"[Slave] Error: {e}")
+                with self._lock:
+                    self._new_data = self._processing = False
 
-def _adsbdb_lookup(session, icao24, callsign):
-    """Look up combined aircraft + flightroute info from adsbdb.
+        @property
+        def new_data(self):
+            with self._lock: return self._new_data
+        @property
+        def processing(self):
+            with self._lock: return self._processing
+        @property
+        def data(self):
+            with self._lock:
+                self._new_data = False
+                return self._data
+        @property
+        def tracked_data(self):
+            with self._lock: return self._tracked_data
+        @property
+        def data_is_empty(self): return len(self._data) == 0
+        @property
+        def fr24_ok(self): return self._fr24_ok
 
-    Returns a tuple (aircraft_dict, flightroute_dict). Either side can be
-    None if the lookup failed or that piece is unknown.
+else:
+    # MASTER MODE — full OpenSky + FR24 stack
+    print("[Overhead] Master mode — running full OpenSky + FR24 stack")
+
     """
-    if not icao24:
-        return None, None
-
-    params = {}
-    if callsign:
-        params["callsign"] = callsign
-
-    try:
-        resp = session.get(
-            f"{ADSBDB_BASE_URL}/aircraft/{icao24}",
-            params=params,
-            timeout=ADSBDB_TIMEOUT,
-        )
-    except (ConnectionError, RequestException, NewConnectionError, MaxRetryError):
-        return None, None
-
-    if resp.status_code == 404:
-        # Aircraft unknown to adsbdb; still try to fetch the route by callsign
-        # alone so we can at least populate origin/destination/airline.
-        return None, _adsbdb_route_only(session, callsign)
-
-    if resp.status_code != 200:
-        return None, None
+    overhead.py — Auto-selects master or slave mode based on config.
+    If MASTER_TRACKER = "" this Pi runs the full OpenSky + FR24 stack.
+    If MASTER_TRACKER = "hostname" this Pi polls the master for data.
+    All scenes import Overhead from here unchanged.
+    """
 
     try:
-        body = resp.json().get("response") or {}
-    except ValueError:
-        return None, None
+        from config import MASTER_TRACKER
+    except (ImportError, ModuleNotFoundError, NameError):
+        MASTER_TRACKER = ""
 
-    return body.get("aircraft"), body.get("flightroute")
+    if MASTER_TRACKER:
+        # ---------------------------------------------------------------
+        # SLAVE MODE — poll master Flask API, no API calls
+        # ---------------------------------------------------------------
+        import os
+        import json
+        from time import time
+        from threading import Thread, Lock
 
+        import requests
+        from requests.exceptions import ConnectionError
+        from urllib3.exceptions import NewConnectionError, MaxRetryError
 
-def _adsbdb_route_only(session, callsign):
-    if not callsign:
-        return None
-    try:
-        resp = session.get(
-            f"{ADSBDB_BASE_URL}/callsign/{callsign}",
-            timeout=ADSBDB_TIMEOUT,
-        )
-    except (ConnectionError, RequestException, NewConnectionError, MaxRetryError):
-        return None
-    if resp.status_code != 200:
-        return None
-    try:
-        return (resp.json().get("response") or {}).get("flightroute")
-    except ValueError:
-        return None
+        POLL_INTERVAL = 5
+        BASE_DIR      = os.path.dirname(os.path.dirname(__file__))
+        TRACKED_FILE  = os.path.join(BASE_DIR, "tracked_flight.json")
 
-
-def _bbox_from_zone(zone):
-    """Convert ZONE_HOME (top-left / bottom-right corners) to OpenSky bbox
-    tuple (min_lat, max_lat, min_lon, max_lon)."""
-    return (
-        min(zone["tl_y"], zone["br_y"]),
-        max(zone["tl_y"], zone["br_y"]),
-        min(zone["tl_x"], zone["br_x"]),
-        max(zone["tl_x"], zone["br_x"]),
-    )
-
-
-class Overhead:
-    def __init__(self):
-        if OPENSKY_CLIENT_ID and OPENSKY_CLIENT_SECRET:
-            self._opensky = OpenSkyApi(
-                client_id=OPENSKY_CLIENT_ID,
-                client_secret=OPENSKY_CLIENT_SECRET,
-            )
-        else:
-            self._opensky = OpenSkyApi()
-
-        self._adsbdb_session = requests.Session()
-        self._adsbdb_session.headers.update({"User-Agent": "plane-tracker-rgb-pi"})
-
-        self._lock = Lock()
-        self._data = []
-        self._new_data = False
-        self._processing = False
-
-    def grab_data(self):
-        Thread(target=self._grab_data, daemon=True).start()
-
-    def _grab_data(self):
-        with self._lock:
-            self._new_data = False
-            self._processing = True
-
-        data = []
+        import math as _math
 
         try:
-            bbox = _bbox_from_zone(ZONE_DEFAULT)
-            states = self._opensky.get_states(bbox=bbox)
+            from config import LOCATION_HOME as _LOCATION_HOME
+            _SLAVE_HOME = _LOCATION_HOME
+        except Exception:
+            _SLAVE_HOME = [41.882724, -87.623350]
 
-            # `get_states` returns None when the OpenSky client-side rate
-            # limiter blocks the request or the server returns a non-200.
-            # Treat that as "no fresh data this cycle" rather than "no
-            # planes overhead", so the screen keeps showing the last result.
-            if states is None:
+        try:
+            from config import DISTANCE_UNITS as _DISTANCE_UNITS
+        except Exception:
+            _DISTANCE_UNITS = "imperial"
+
+        _EARTH_RADIUS_M = 3958.8
+
+        def _haversine_slave(lat1, lon1, lat2, lon2):
+            lat1, lon1 = map(_math.radians, (lat1, lon1))
+            lat2, lon2 = map(_math.radians, (lat2, lon2))
+            dlat = lat2 - lat1
+            dlon = lon2 - lon1
+            a = _math.sin(dlat/2)**2 + _math.cos(lat1)*_math.cos(lat2)*_math.sin(dlon/2)**2
+            c = 2 * _math.atan2(_math.sqrt(a), _math.sqrt(1-a))
+            miles = _EARTH_RADIUS_M * c
+            return miles * 1.609 if _DISTANCE_UNITS == "metric" else miles
+
+        def _bearing_slave(lat, lon):
+            lat1, lon1 = map(_math.radians, _SLAVE_HOME)
+            lat2, lon2 = map(_math.radians, (lat, lon))
+            b = _math.atan2(_math.sin(lon2-lon1)*_math.cos(lat2), _math.cos(lat1)*_math.sin(lat2)-_math.sin(lat1)*_math.cos(lat2)*_math.cos(lon2-lon1))
+            return (_math.degrees(b)+360)%360
+
+        def _cardinal(deg):
+            dirs = ["N","NE","E","SE","S","SW","W","NW"]
+            return dirs[int((deg+22.5)/45)%8]
+
+        def _recalculate_for_slave(flights):
+            """Recalculate distance and direction relative to slave's own location."""
+            for f in flights:
+                lat = f.get("plane_latitude")
+                lon = f.get("plane_longitude")
+                if lat is not None and lon is not None:
+                    f["distance"]  = _haversine_slave(lat, lon, _SLAVE_HOME[0], _SLAVE_HOME[1])
+                    f["direction"] = _cardinal(_bearing_slave(lat, lon))
+            return flights
+
+        def _master_url(path):
+            host = MASTER_TRACKER.rstrip("/")
+            if not host.startswith("http"):
+                host = f"http://{host}.local:8080"
+            return f"{host}{path}"
+
+        class Overhead:
+            def __init__(self):
+                self._lock         = Lock()
+                self._data         = []
+                self._tracked_data = None
+                self._new_data     = False
+                self._processing   = False
+                self._fr24_ok      = True
+                print(f"[Overhead] Slave mode — polling master at {_master_url('')}")
+
+            def grab_data(self):
+                Thread(target=self._grab, daemon=True).start()
+
+            def _grab(self):
+                with self._lock:
+                    self._new_data   = False
+                    self._processing = True
+                try:
+                    resp = requests.get(_master_url("/overhead/json"), timeout=10)
+                    resp.raise_for_status()
+                    overhead_data = resp.json()
+                    if not isinstance(overhead_data, list):
+                        overhead_data = []
+                    overhead_data = _recalculate_for_slave(overhead_data)
+
+                    tracked_data = None
+                    try:
+                        tresp = requests.get(_master_url("/tracked/json/live"), timeout=10)
+                        tresp.raise_for_status()
+                        td = tresp.json()
+                        tracked_data = td if td.get("callsign") else None
+                    except Exception as e:
+                        print(f"[Slave] Tracked poll failed: {e}")
+
+                    with self._lock:
+                        self._data         = overhead_data
+                        self._tracked_data = tracked_data
+                        self._new_data     = True
+                        self._processing   = False
+
+                except (ConnectionError, NewConnectionError, MaxRetryError) as e:
+                    print(f"[Slave] Cannot reach master: {e}")
+                    with self._lock:
+                        self._new_data   = False
+                        self._processing = False
+                except Exception as e:
+                    print(f"[Slave] Poll error: {e}")
+                    with self._lock:
+                        self._new_data   = False
+                        self._processing = False
+
+            @property
+            def new_data(self):
+                with self._lock: return self._new_data
+
+            @property
+            def processing(self):
+                with self._lock: return self._processing
+
+            @property
+            def data(self):
                 with self._lock:
                     self._new_data = False
-                    self._processing = False
-                return
+                    return self._data
 
-            raw_states = states.states or []
+            @property
+            def tracked_data(self):
+                with self._lock: return self._tracked_data
 
-            flights = [
-                _Flight(s)
-                for s in raw_states
-                if s.latitude is not None and s.longitude is not None and not s.on_ground
-            ]
-            flights = [f for f in flights if MIN_ALTITUDE < f.altitude < MAX_ALTITUDE]
-            flights = sorted(flights, key=lambda f: distance_from_flight_to_home(f))
+            @property
+            def data_is_empty(self):
+                return len(self._data) == 0
 
-            for flight in flights[:MAX_FLIGHT_LOOKUP]:
-                # Be polite to adsbdb between lookups.
-                sleep(RATE_LIMIT_DELAY)
+            @property
+            def fr24_ok(self):
+                return self._fr24_ok
 
-                aircraft_info, route_info = _adsbdb_lookup(
-                    self._adsbdb_session, flight.icao24, flight.callsign
-                )
+    else:
+        # ---------------------------------------------------------------
+        # MASTER MODE — full OpenSky + FR24 stack
+        # ---------------------------------------------------------------
+        print("[Overhead] Master mode — running full OpenSky + FR24 stack")
 
-                # ---- Aircraft type ----
-                plane = ""
-                if aircraft_info:
-                    plane = (aircraft_info.get("icao_type") or "").strip()
-                    if plane.upper() in BLANK_FIELDS:
-                        plane = (aircraft_info.get("type") or "").strip()
-                if plane.upper() in BLANK_FIELDS:
-                    plane = ""
+        import os
+        import json
+        import math
+        import requests as _requests
+        from datetime import date
+        from time import sleep, time
+        from threading import Thread, Lock
 
-                # ---- Airline / route ----
-                airline_name = ""
-                owner_icao = ""
-                owner_iata = ""
-                origin = ""
-                destination = ""
-                origin_lat = origin_lon = origin_alt = None
-                dest_lat = dest_lon = dest_alt = None
+        from requests.exceptions import ConnectionError
+        from urllib3.exceptions import NewConnectionError, MaxRetryError
 
-                if route_info:
-                    airline = route_info.get("airline") or {}
-                    airline_name = (airline.get("name") or "").strip()
-                    owner_icao = (airline.get("icao") or "").strip()
-                    owner_iata = (airline.get("iata") or "").strip()
+        from config import (
+            DISTANCE_UNITS,
+            CLOCK_FORMAT,
+            MAX_FARTHEST,
+            MAX_CLOSEST,
+        )
 
-                    origin_info = route_info.get("origin") or {}
-                    destination_info = route_info.get("destination") or {}
-                    origin = (origin_info.get("iata_code") or "").strip()
-                    destination = (destination_info.get("iata_code") or "").strip()
-                    origin_lat = origin_info.get("latitude")
-                    origin_lon = origin_info.get("longitude")
-                    origin_alt = origin_info.get("elevation")
-                    dest_lat = destination_info.get("latitude")
-                    dest_lon = destination_info.get("longitude")
-                    dest_alt = destination_info.get("elevation")
+        # Optional integrations: setup.email_alerts and web.{map_generator,upload_helper}
+        # aren't shipped in this tree. If they're missing we fall back to no-op stubs
+        # so log_closest_flight / log_farthest_flight still write to disk, just without
+        # email summaries or uploaded maps.
+        try:
+            from setup import email_alerts  # type: ignore
+        except (ImportError, ModuleNotFoundError):
+            from datetime import datetime as _dt
 
-                # Fall back to the registered owner when we have no airline
-                # match (general aviation, private operators, etc.).
-                if not airline_name and aircraft_info:
-                    airline_name = (aircraft_info.get("registered_owner") or "").strip()
-                if not owner_icao and aircraft_info:
-                    owner_icao = (
-                        aircraft_info.get("registered_owner_operator_flag_code") or ""
-                    ).strip()
+            class _EmailAlertsStub:
+                @staticmethod
+                def get_timestamp():
+                    return _dt.now().strftime("%Y-%m-%d %H:%M:%S")
 
-                # Normalise blanks
-                if origin.upper() in BLANK_FIELDS:
-                    origin = ""
-                if destination.upper() in BLANK_FIELDS:
-                    destination = ""
-                if owner_icao.upper() in BLANK_FIELDS:
-                    owner_icao = ""
-                callsign = flight.callsign if flight.callsign.upper() not in BLANK_FIELDS else ""
-                owner_iata = owner_iata if owner_iata else "N/A"
+                @staticmethod
+                def send_flight_summary(*_args, **_kwargs):
+                    return None
 
-                # ---- Distances ----
-                distance_origin = 0
-                distance_destination = 0
-                if origin_lat is not None and origin_lon is not None:
-                    distance_origin = (
-                        distance_from_flight_to_origin(
-                            flight, origin_lat, origin_lon, origin_alt or 0
-                        )
-                        or 0
-                    )
-                if dest_lat is not None and dest_lon is not None:
-                    distance_destination = (
-                        distance_from_flight_to_destination(
-                            flight, dest_lat, dest_lon, dest_alt or 0
-                        )
-                        or 0
-                    )
+            email_alerts = _EmailAlertsStub()
+            print("[Overhead] setup.email_alerts not found — email summaries disabled.")
 
-                data.append(
-                    {
-                        "airline": airline_name,
-                        "plane": plane,
-                        "origin": origin,
-                        "owner_iata": owner_iata,
-                        "owner_icao": owner_icao,
-                        "destination": destination,
-                        # OpenSky/adsbdb don't expose scheduled vs. actual
-                        # times, so we leave these as None. The journey
-                        # scene treats None as "unknown" and renders the
-                        # airport codes in neutral grey.
-                        "time_scheduled_departure": None,
-                        "time_scheduled_arrival": None,
-                        "time_real_departure": None,
-                        "time_estimated_arrival": None,
-                        "vertical_speed": flight.vertical_speed,
-                        "callsign": callsign,
-                        "distance_origin": distance_origin,
-                        "distance_destination": distance_destination,
-                        "distance": distance_from_flight_to_home(flight),
-                        "direction": degrees_to_cardinal(plane_bearing(flight)),
-                    }
-                )
+        try:
+            from web import map_generator, upload_helper  # type: ignore
+        except (ImportError, ModuleNotFoundError):
+            class _MapGeneratorStub:
+                @staticmethod
+                def generate_closest_map(*_args, **_kwargs):
+                    return None
 
-            with self._lock:
-                self._new_data = True
-                self._processing = False
-                self._data = data
+                @staticmethod
+                def generate_farthest_map(*_args, **_kwargs):
+                    return None
 
-        except (ConnectionError, NewConnectionError, MaxRetryError, RequestException):
-            with self._lock:
-                self._new_data = False
-                self._processing = False
-        except Exception as e:
-            print(f"Overhead error: {e}")
-            with self._lock:
-                self._new_data = False
-                self._processing = False
+            class _UploadHelperStub:
+                @staticmethod
+                def upload_map_to_server(*_args, **_kwargs):
+                    return None
 
-    @property
-    def new_data(self):
-        with self._lock:
-            return self._new_data
+            map_generator = _MapGeneratorStub()
+            upload_helper = _UploadHelperStub()
+            print("[Overhead] web.map_generator/upload_helper not found — map generation/upload disabled.")
 
-    @property
-    def processing(self):
-        with self._lock:
-            return self._processing
+        from utilities.opensky import OpenSkyClient
+        from utilities.routelookup import RouteClient as FR24Client
 
-    @property
-    def data(self):
-        with self._lock:
-            self._new_data = False
-            return self._data
+        try:
+            from config import ZONE_HOME, LOCATION_HOME
+            ZONE_DEFAULT     = ZONE_HOME
+            LOCATION_DEFAULT = LOCATION_HOME
+        except (ImportError, ModuleNotFoundError, NameError):
+            ZONE_DEFAULT     = {"tl_y": 41.904318, "tl_x": -87.647367, "br_y": 41.851654, "br_x": -87.573027}
+            LOCATION_DEFAULT = [41.882724, -87.623350]
 
-    @property
-    def data_is_empty(self):
-        return len(self._data) == 0
+        try:
+            from config import MIN_ALTITUDE
+        except (ImportError, ModuleNotFoundError, NameError):
+            MIN_ALTITUDE = 0
 
+        MAX_FLIGHT_LOOKUP = 5
+        EARTH_RADIUS_M    = 3958.8
+        BASE_DIR          = os.path.dirname(os.path.dirname(__file__))
+        LOG_FILE          = os.path.join(BASE_DIR, "close.txt")
+        LOG_FILE_FARTHEST = os.path.join(BASE_DIR, "farthest.txt")
+        TRACKED_FILE      = os.path.join(BASE_DIR, "tracked_flight.json")
+        COUNTER_FILE      = os.path.join(BASE_DIR, "flight_counter.json")
 
-# Main function
-if __name__ == "__main__":
+        def safe_load_json(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    return data if isinstance(data, list) else []
+            except (FileNotFoundError, json.JSONDecodeError):
+                return []
 
-    o = Overhead()
-    o.grab_data()
-    while o.processing:
-        print("processing...")
-        sleep(1)
+        def safe_write_json(path, data):
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4)
 
-    print(o.data)
+        def ordinal(n):
+            return f"{n}{'tsnrhtdd'[(n//10 % 10 != 1) * (n % 10 < 4) * n % 10::4]}"
+
+        def haversine(lat1, lon1, lat2, lon2):
+            lat1, lon1 = map(math.radians, (lat1, lon1))
+            lat2, lon2 = map(math.radians, (lat2, lon2))
+            dlat = lat2 - lat1
+            dlon = lon2 - lon1
+            a = math.sin(dlat/2)**2 + math.cos(lat1)*math.cos(lat2)*math.sin(dlon/2)**2
+            c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+            miles = EARTH_RADIUS_M * c
+            return miles * 1.609 if DISTANCE_UNITS == "metric" else miles
+
+        def degrees_to_cardinal(deg):
+            dirs = ["N","NE","E","SE","S","SW","W","NW"]
+            return dirs[int((deg+22.5)/45)%8]
+
+        def plane_bearing(lat, lon):
+            lat1, lon1 = map(math.radians, LOCATION_DEFAULT)
+            lat2, lon2 = map(math.radians, (lat, lon))
+            b = math.atan2(math.sin(lon2-lon1)*math.cos(lat2), math.cos(lat1)*math.sin(lat2)-math.sin(lat1)*math.cos(lat2)*math.cos(lon2-lon1))
+            return (math.degrees(b)+360)%360
+
+        def distance_from_home(lat, lon):
+            return haversine(lat, lon, LOCATION_DEFAULT[0], LOCATION_DEFAULT[1])
+
+        def estimate_stale_data(last_data):
+            data = dict(last_data)
+            data["is_live"] = False
+            speed_kts = data.get("ground_speed", 0)
+            last_ts   = data.get("last_seen_ts")
+            if not last_ts:
+                return data
+            elapsed_hrs  = (time() - last_ts) / 3600
+            elapsed_mins = elapsed_hrs * 60
+            last_time_str = data.get("time_remaining", "")
+            if last_time_str:
+                try:
+                    if ":" in last_time_str:
+                        parts = last_time_str.split(":")
+                        last_mins = int(parts[0]) * 60 + int(parts[1])
+                    else:
+                        last_mins = int(last_time_str.replace("m", ""))
+                    est_mins = max(0, last_mins - int(elapsed_mins))
+                    h = est_mins // 60
+                    m = est_mins % 60
+                    data["time_remaining"] = f"{h}:{m:02d}" if h > 0 else f"{m}m"
+                except (ValueError, IndexError):
+                    pass
+            last_dist = data.get("dist_remaining")
+            if last_dist is not None and speed_kts > 0:
+                speed_display = speed_kts * (1.852 if DISTANCE_UNITS == "metric" else 1.15078)
+                data["dist_remaining"] = max(0, last_dist - speed_display * elapsed_hrs)
+            return data
+
+        def _load_counter_log():
+            try:
+                with open(COUNTER_FILE, "r") as f:
+                    return json.load(f)
+            except (FileNotFoundError, json.JSONDecodeError):
+                return {}
+
+        def _save_counter_log(data):
+            with open(COUNTER_FILE, "w") as f:
+                json.dump(data, f, indent=2)
+
+        def log_flight_count(callsign, entry=None):
+            if entry is None: entry = {}
+            from datetime import datetime
+            now     = datetime.now()
+            today   = str(now.date())
+            now_str = now.strftime("%H:%M:%S")
+            log     = _load_counter_log()
+            if today not in log:
+                log[today] = {"date": today, "count": 0, "flights": [], "first_seen": now_str, "last_seen": now_str}
+            seen = [e["callsign"] for e in log[today]["flights"]]
+            if callsign and callsign not in seen:
+                log[today]["flights"].append({
+                    "callsign": callsign,
+                    "time":     now_str,
+                    "hour":     now.hour,
+                    "origin":   entry.get("origin", ""),
+                    "dest":     entry.get("destination", ""),
+                })
+                log[today]["count"]     = len(log[today]["flights"])
+                log[today]["last_seen"] = now_str
+                _save_counter_log(log)
+
+        def load_tracked_callsign():
+            try:
+                with open(TRACKED_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f).get("callsign", "").strip().upper()
+            except (FileNotFoundError, json.JSONDecodeError):
+                return ""
+
+        def log_flight_data(entry):
+            try:
+                entry["timestamp"] = email_alerts.get_timestamp()
+                lst = safe_load_json(LOG_FILE)
+                callsigns = {f.get("callsign"): f for f in lst}
+                new_call  = entry.get("callsign")
+                new_dist  = entry.get("distance", float("inf"))
+                notify    = False
+                if new_call in callsigns:
+                    idx = next(i for i, f in enumerate(lst) if f.get("callsign") == new_call)
+                    if new_dist < lst[idx].get("distance", float("inf")):
+                        lst[idx] = entry
+                    else:
+                        return
+                else:
+                    lst.append(entry)
+                lst.sort(key=lambda x: x.get("distance", float("inf")))
+                top_n = lst[:MAX_CLOSEST]
+                if new_call not in [f["callsign"] for f in top_n]:
+                    return
+                rank = next(i+1 for i,f in enumerate(top_n) if f["callsign"] == new_call)
+                if new_call not in callsigns:
+                    notify = True
+                safe_write_json(LOG_FILE, top_n)
+                if notify:
+                    html = map_generator.generate_closest_map(top_n, filename="closest.html")
+                    url  = upload_helper.upload_map_to_server(html)
+                    subject = f"New {ordinal(rank)} Closest Flight - {entry.get('callsign','Unknown')}"
+                    email_alerts.send_flight_summary(subject, entry, map_url=url)
+            except Exception as e:
+                print("Failed to log closest flight:", e)
+
+        def log_farthest_flight(entry, opensky=None):
+            try:
+                d_o = entry.get("distance_origin") or -1
+                d_d = entry.get("distance_destination") or -1
+                if d_o < 0 and d_d < 0:
+                    return
+                reason  = "origin" if d_o >= d_d else "destination"
+                far     = d_o if reason == "origin" else d_d
+                airport = entry.get(reason)
+                if not airport or airport in ("?", "???", ""):
+                    # Use callsign as unique key for unknown airports
+                    airport = f"_{entry.get('callsign', 'UNKNOWN')}"
+                    return
+
+                # Fetch actual flown trail from OpenSky using icao24
+                icao24 = entry.get("icao24", "")
+                if icao24 and not entry.get("trail") and opensky:
+                    try:
+                        trail = opensky.get_flight_trail(icao24)
+                        if trail:
+                            entry["trail"] = trail
+                    except Exception:
+                        pass
+                entry["timestamp"]      = email_alerts.get_timestamp()
+                entry["reason"]         = reason
+                entry["farthest_value"] = far
+                entry["_airport"]       = airport
+                lst         = safe_load_json(LOG_FILE_FARTHEST)
+                # Ensure all farthest_values are floats
+                for f in lst:
+                    f["farthest_value"] = float(f.get("farthest_value", 0))
+                airport_map = {f["_airport"]: f for f in lst}
+                existing    = airport_map.get(airport)
+                notify      = False
+                if existing:
+                    if far > existing.get("farthest_value", 0):
+                        lst = [entry if f["_airport"] == airport else f for f in lst]
+                        # No email for updates to existing airports
+                    else:
+                        return
+                else:
+                    if len(lst) >= MAX_FARTHEST:
+                        if far <= min(f["farthest_value"] for f in lst):
+                            return
+                        lst.sort(key=lambda x: x["farthest_value"])
+                        lst.pop(0)
+                    lst.append(entry)
+                    notify = True
+                lst.sort(key=lambda x: float(x.get("farthest_value", 0)), reverse=True)
+                lst = lst[:MAX_FARTHEST]
+                safe_write_json(LOG_FILE_FARTHEST, lst)
+                if notify:
+                    html = map_generator.generate_farthest_map(lst, filename="farthest.html")
+                    url  = upload_helper.upload_map_to_server(html)
+                    rank = next(i for i,f in enumerate(lst) if f["_airport"] == airport) + 1
+                    cs   = entry.get("callsign", "UNKNOWN")
+                    subject = (f"New Farthest Flight ({reason}) - {cs}" if rank == 1 else f"{ordinal(rank)}-Farthest Flight ({reason}) - {cs}")
+                    email_alerts.send_flight_summary(subject, entry, reason, map_url=url)
+            except Exception as e:
+                print("Failed to log farthest flight:", e)
+        class Overhead:
+            def __init__(self):
+                self._opensky  = OpenSkyClient()
+                self._fr24     = FR24Client()  # RouteClient from routelookup.py
+                self._lock     = Lock()
+                self._data         = []
+                self._tracked_data = None
+                self._new_data     = False
+                self._processing   = False
+                self._flight_cache = {}
+                self._tracked_was_live        = False
+                self._tracked_miss_count      = 0
+                self._TRACKED_MISS_THRESHOLD  = 3
+                self._tracked_last_callsign   = ""
+                self._tracked_last_eta        = None
+                self._tracked_last_data       = None
+                self._tracked_route_cached    = None  # cached route info from API
+                self._tracked_route_callsign  = ""    # callsign the cache is for
+
+            def grab_data(self):
+                Thread(target=self._grab, daemon=True).start()
+
+            def _grab(self):
+                with self._lock:
+                    self._new_data   = False
+                    self._processing = True
+
+                overhead_data = []
+                tracked_data  = None
+
+                try:
+                    zone_states = self._opensky.get_zone_states()
+                    zone_states.sort(key=lambda s: distance_from_home(s["latitude"], s["longitude"]))
+                    zone_states = zone_states[:MAX_FLIGHT_LOOKUP]
+
+                    current_callsigns = {s["callsign"] for s in zone_states}
+                    self._flight_cache = {k: v for k, v in self._flight_cache.items() if k in current_callsigns}
+
+                    for state in zone_states:
+                        callsign  = state["callsign"]
+                        plane_lat = state["latitude"]
+                        plane_lon = state["longitude"]
+
+                        if callsign in self._flight_cache:
+                            details = self._flight_cache[callsign]
+                        else:
+                            details = self._fr24.get_flight_details(callsign, plane_lat, plane_lon)
+                            if not details:
+                                continue
+                            self._flight_cache[callsign] = details
+
+                        dist_home  = distance_from_home(plane_lat, plane_lon)
+                        bearing    = plane_bearing(plane_lat, plane_lon)
+                        origin_lat = details.get("origin_latitude")
+                        origin_lon = details.get("origin_longitude")
+                        dest_lat   = details.get("destination_latitude")
+                        dest_lon   = details.get("destination_longitude")
+                        dist_o = haversine(plane_lat, plane_lon, origin_lat, origin_lon) if origin_lat else 0
+                        dist_d = haversine(plane_lat, plane_lon, dest_lat, dest_lon) if dest_lat else 0
+
+                        entry = {
+                            **details,
+                            "plane_latitude":       plane_lat,
+                            "plane_longitude":      plane_lon,
+                            "vertical_speed":       state["vertical_speed"],
+                            "callsign":             callsign,
+                            "icao24":               state.get("icao24", ""),
+                            "distance":             dist_home,
+                            "direction":            degrees_to_cardinal(bearing),
+                            "distance_origin":      dist_o,
+                            "distance_destination": dist_d,
+                        }
+
+                        overhead_data.append(entry)
+                        log_flight_data(entry)
+                        log_farthest_flight(entry, opensky=self._opensky)
+                        log_flight_count(callsign, entry)
+
+                    tracked_callsign = load_tracked_callsign()
+                    if tracked_callsign:
+                        # Reset state if callsign changed
+                        if tracked_callsign != self._tracked_last_callsign:
+                            self._tracked_last_callsign  = tracked_callsign
+                            self._tracked_was_live       = False
+                            self._tracked_miss_count     = 0
+                            self._tracked_last_eta       = None
+                            self._tracked_last_data      = None
+                            self._tracked_route_cached   = None
+                            self._tracked_route_callsign = ""
+
+                        # Step 1: Poll OpenSky for live position (free)
+                        os_state = self._opensky.find_callsign(tracked_callsign)
+
+                        if os_state:
+                            self._tracked_was_live   = True
+                            self._tracked_miss_count = 0
+
+                            # Step 2: Get route info once via RouteClient cascade, then cache it
+                            if self._tracked_route_callsign != tracked_callsign or not self._tracked_route_cached:
+                                route = self._fr24.get_tracked_flight(tracked_callsign)
+                                if not route:
+                                    # Fall back to full RouteClient cascade
+                                    from utilities.routelookup import RouteClient as _RC
+                                    _rc = _RC()
+                                    details = _rc.get_flight_details(
+                                        tracked_callsign,
+                                        os_state["latitude"],
+                                        os_state["longitude"],
+                                    )
+                                    if details and details.get("origin") not in ("?", "", None):
+                                        route = {
+                                            "airline_name":  details.get("airline", ""),
+                                            "origin":        details.get("origin", ""),
+                                            "destination":   details.get("destination", ""),
+                                            "dest_lat":      details.get("destination_latitude"),
+                                            "dest_lon":      details.get("destination_longitude"),
+                                            "aircraft_type": details.get("plane", ""),
+                                            "time_scheduled_departure": details.get("time_scheduled_departure"),
+                                            "time_scheduled_arrival":   details.get("time_scheduled_arrival"),
+                                            "time_real_departure":      details.get("time_real_departure"),
+                                            "time_estimated_arrival":   details.get("time_estimated_arrival"),
+                                        }
+                                if route:
+                                    self._tracked_route_cached   = route
+                                    self._tracked_route_callsign = tracked_callsign
+
+                            # Step 3: Build tracked_data from OpenSky position + cached route
+                            route_info = self._tracked_route_cached or {}
+                            tracked_data = {
+                                "callsign":      tracked_callsign,
+                                "number":        tracked_callsign,
+                                "airline_name":  route_info.get("airline_name", "") or route_info.get("airline", ""),
+                                "is_live":       True,
+                                "origin":        route_info.get("origin", ""),
+                                "destination":   route_info.get("destination", ""),
+                                "dest_lat":      route_info.get("destination_latitude") or route_info.get("dest_lat"),
+                                "dest_lon":      route_info.get("destination_longitude") or route_info.get("dest_lon"),
+                                "aircraft_type": route_info.get("aircraft_type", "") or route_info.get("plane", ""),
+                                # Live position from OpenSky (free, updates every 30s)
+                                "altitude":      os_state["altitude"],
+                                "ground_speed":  os_state["ground_speed"],
+                                "heading":       os_state["heading"],
+                                "vertical_speed": os_state.get("vertical_speed", 0),
+                                "latitude":      os_state["latitude"],
+                                "longitude":     os_state["longitude"],
+                                "time_scheduled_departure": route_info.get("time_scheduled_departure"),
+                                "time_scheduled_arrival":   route_info.get("time_scheduled_arrival"),
+                                "time_real_departure":      route_info.get("time_real_departure"),
+                                "time_estimated_arrival":   route_info.get("time_estimated_arrival"),
+                            }
+                            # Calculate distance remaining and ETA from live position
+                            dest_lat = route_info.get("destination_latitude") or route_info.get("dest_lat")
+                            dest_lon = route_info.get("destination_longitude") or route_info.get("dest_lon")
+                            origin_lat = route_info.get("origin_latitude") or route_info.get("origin_lat")
+                            origin_lon = route_info.get("origin_longitude") or route_info.get("origin_lon")
+                            speed_kts = os_state.get("ground_speed", 0)
+                            if dest_lat and dest_lon and speed_kts > 50:
+                                import math as _math
+                                lat1,lon1 = _math.radians(os_state["latitude"]), _math.radians(os_state["longitude"])
+                                lat2,lon2 = _math.radians(dest_lat), _math.radians(dest_lon)
+                                dlat,dlon = lat2-lat1, lon2-lon1
+                                a = _math.sin(dlat/2)**2 + _math.cos(lat1)*_math.cos(lat2)*_math.sin(dlon/2)**2
+                                dist_nm = 3440.07 * 2 * _math.atan2(_math.sqrt(a), _math.sqrt(1-a))
+                                hours_remaining = dist_nm / speed_kts
+                                from time import time as _time
+                                eta_ts = _time() + hours_remaining * 3600
+                                tracked_data["time_estimated_arrival"]   = eta_ts
+                                tracked_data["time_scheduled_arrival"]   = eta_ts
+                                try:
+                                    from config import DISTANCE_UNITS as _DU
+                                except Exception:
+                                    _DU = "imperial"
+                                dist_display = dist_nm * 1.15078 if _DU == "imperial" else dist_nm * 1.852
+                                tracked_data["distance_destination"] = dist_display
+                                # Fields for tracked scenes
+                                tracked_data["dist_remaining"] = dist_display
+
+                                # Format time remaining as "H:MM"
+                                total_mins = int(hours_remaining * 60)
+                                hrs  = total_mins // 60
+                                mins = total_mins % 60
+                                tracked_data["time_remaining"] = f"{hrs}:{mins:02d}" if hrs else f"{mins}m"
+
+                                # total_distance — origin to dest great circle
+                                if origin_lat and origin_lon:
+                                    lat1o,lon1o = _math.radians(origin_lat), _math.radians(origin_lon)
+                                    ao = _math.sin((lat2-lat1o)/2)**2 + _math.cos(lat1o)*_math.cos(lat2)*_math.sin((lon2-lon1o)/2)**2
+                                    total_nm = 3440.07 * 2 * _math.atan2(_math.sqrt(ao), _math.sqrt(1-ao))
+                                    tracked_data["total_distance"] = total_nm * 1.15078 if _DU == "imperial" else total_nm * 1.852
+                                else:
+                                    # Look up origin coords from airports database
+                                    origin_code = route_info.get("origin", "")
+                                    if origin_code:
+                                        try:
+                                            from utilities.airports import get_airport_coords as _gac
+                                            oc = _gac(origin_code)
+                                            if oc:
+                                                lat1o,lon1o = _math.radians(oc["lat"]), _math.radians(oc["lon"])
+                                                ao = _math.sin((lat2-lat1o)/2)**2 + _math.cos(lat1o)*_math.cos(lat2)*_math.sin((lon2-lon1o)/2)**2
+                                                total_nm = 3440.07 * 2 * _math.atan2(_math.sqrt(ao), _math.sqrt(1-ao))
+                                                tracked_data["total_distance"] = total_nm * 1.15078 if _DU == "imperial" else total_nm * 1.852
+                                        except Exception:
+                                            pass
+                            self._tracked_last_eta  = tracked_data.get("time_estimated_arrival")
+                            self._tracked_last_data = tracked_data
+
+                        else:
+                            # OpenSky didn't find it
+                            if self._tracked_was_live:
+                                now_ts = time()
+                                eta    = self._tracked_last_eta
+                                if eta is not None:
+                                    mins_since_eta = (now_ts - eta) / 60
+                                    if mins_since_eta > 0:
+                                        self._tracked_miss_count += 1
+                                        if self._tracked_miss_count >= self._TRACKED_MISS_THRESHOLD:
+                                            self._do_auto_wipe()
+                                        elif self._tracked_last_data:
+                                            tracked_data = estimate_stale_data(self._tracked_last_data)
+                                    else:
+                                        self._tracked_miss_count = 0
+                                        if self._tracked_last_data:
+                                            tracked_data = estimate_stale_data(self._tracked_last_data)
+                                else:
+                                    self._tracked_miss_count += 1
+                                    if self._tracked_miss_count >= self._TRACKED_MISS_THRESHOLD:
+                                        self._do_auto_wipe()
+                                    elif self._tracked_last_data:
+                                        tracked_data = estimate_stale_data(self._tracked_last_data)
+
+                    # Write current overhead for slave trackers
+                    try:
+                        current_file = os.path.join(BASE_DIR, "current_overhead.json")
+                        with open(current_file, "w", encoding="utf-8") as f:
+                            json.dump(overhead_data, f)
+                    except Exception as e:
+                        print(f"Failed to write current_overhead.json: {e}")
+
+                    # Print API usage tally once per cycle
+                    try:
+                        from utilities.routelookup import _print_tally
+                        _print_tally()
+                    except Exception:
+                        pass
+
+                    with self._lock:
+                        self._data         = overhead_data
+                        self._tracked_data = tracked_data
+                        self._new_data     = True
+                        self._processing   = False
+
+                except (ConnectionError, NewConnectionError, MaxRetryError):
+                    with self._lock:
+                        self._fr24_ok    = False
+                        self._new_data   = False
+                        self._processing = False
+
+            def _do_auto_wipe(self):
+                try:
+                    with open(TRACKED_FILE, "w", encoding="utf-8") as f:
+                        json.dump({"callsign": ""}, f)
+                    print("Tracked flight ended — auto-cleared.")
+                except Exception as e:
+                    print(f"Failed to auto-clear tracked flight: {e}")
+                self._tracked_was_live      = False
+                self._tracked_miss_count    = 0
+                self._tracked_last_eta      = None
+                self._tracked_last_data     = None
+                self._tracked_last_callsign = ""
+
+            @property
+            def new_data(self):
+                with self._lock: return self._new_data
+
+            @property
+            def processing(self):
+                with self._lock: return self._processing
+
+            @property
+            def data(self):
+                with self._lock:
+                    self._new_data = False
+                    return self._data
+
+            @property
+            def tracked_data(self):
+                with self._lock: return self._tracked_data
+
+            @property
+            def data_is_empty(self):
+                return len(self._data) == 0
+
+            @property
+            def fr24_ok(self):
+                return self._fr24.ok

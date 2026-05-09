@@ -100,8 +100,11 @@ if TEMPERATURE_UNITS != "metric" and TEMPERATURE_UNITS != "imperial":
 
 from config import TEMPERATURE_LOCATION
 
-# Weather API
-TOMORROW_API_URL = "https://api.tomorrow.io/v4/"
+# Weather API. Do NOT include a trailing slash here — every call site joins
+# this with f"{TOMORROW_API_URL}/<path>", so a trailing slash produces
+# "https://api.tomorrow.io/v4//<path>" (two slashes). Tomorrow.io tolerates
+# the double slash, but it makes log lines look broken and is just wrong.
+TOMORROW_API_URL = "https://api.tomorrow.io/v4"
 
 def _check_rate_limit():
     """Check if we can make an API call based on rate limits"""
