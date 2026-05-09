@@ -1,10 +1,6 @@
 Flight Tracker Status Update
 
-With the discontinuation of FlightRadar24’s free API tier even for Contributor accounts, I have transitioned the backend to a multi-source workaround. The script now utilizes OpenSky for real-time overhead tracking, supplemented by adsbdb for fetching specific flight metadata.
-
-Current Status: Partially tested.
-
-Known Issue: Basic tracking is functional; however, there is a known bug causing occasional inaccuracies in destination airport codes.
+Finally working with a bunch of free API sources.
 
 ---
 
